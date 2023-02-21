@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -15,29 +16,28 @@ import (
 )
 
 var (
-	printLogs    bool
-	responseBody string
-	listen       string
-	SEP          = ","
+	listenFlag             string
+	responseStatusCodeFlag int
+	responseBodyFlag       string
+	logFullHeader          bool
+	VersionFlag            bool
+
+	Name      string
+	Version   string
+	GitCommit string
+)
+
+const (
+	SEP = ","
 )
 
 func init() {
-	flag.BoolVar(&printLogs, "print_logs", false, "Print logs")
-	flag.StringVar(&responseBody, "response_body", "Hello, World!", "Response body")
-	flag.StringVar(&listen, "listen", ":8081,:8082", "Ports on which root pattern is going to be listening (Comma separated values)")
-}
+	flag.StringVar(&listenFlag, "listen", ":8081,", "Ports on an HTTP echo server is going to be listening (Comma separated values)")
+	flag.IntVar(&responseStatusCodeFlag, "response_status", 200, "Response status code to be sent")
+	flag.StringVar(&responseBodyFlag, "response_body", "Hello, World!", "Response body to be sent")
+	flag.BoolVar(&logFullHeader, "log_headers", false, "Log full header")
 
-func httpEcho(w http.ResponseWriter, r *http.Request) {
-	if printLogs {
-		log.Println(r.Header)
-	}
-
-	w.Write([]byte(responseBody))
-}
-
-func healthEcho(w http.ResponseWriter, r *http.Request) {
-	w.WriteHeader(http.StatusOK)
-	w.Write([]byte("{status: ok}"))
+	flag.BoolVar(&VersionFlag, "version", false, "Display version information at start")
 }
 
 func listenAndServe(addr string, handler http.Handler, closeCtx context.Context, wg *sync.WaitGroup) {
@@ -51,8 +51,7 @@ func listenAndServe(addr string, handler http.Handler, closeCtx context.Context,
 		log.Printf("[INFO] Server listening on address '%s'", server.Addr)
 		if err := server.ListenAndServe(); err != http.ErrServerClosed {
 			log.Printf("[ERROR] Error starting server. Err: %s", err)
-		} else {
-			log.Printf("[INFO] Server '%s' gracefully shutdown", server.Addr)
+			os.Exit(1)
 		}
 	}()
 
@@ -61,15 +60,28 @@ func listenAndServe(addr string, handler http.Handler, closeCtx context.Context,
 	timeoutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-    server.Shutdown(timeoutCtx)
+	err := server.Shutdown(timeoutCtx)
+	if err != nil {
+		log.Printf("[ERROR] Error shutting down server. Err: %s", err)
+	} else {
+		log.Printf("[INFO] Server '%s' gracefully shutdown", server.Addr)
+	}
 }
 
 func parseListenAddresses(listen string) ([]string, error) {
-	if listen == "" {
-		return nil, errors.New("[ERROR] Invalid list of addresses provided")
+	var addressesList []string
+
+	for _, addr := range strings.Split(listen, SEP) {
+		trimmedAddr := strings.TrimSpace(addr)
+		if trimmedAddr == "" {
+			continue
+		}
+		addressesList = append(addressesList, trimmedAddr)
 	}
 
-	addressesList := strings.Split(listen, SEP)
+	if len(addressesList) == 0 {
+		return nil, errors.New("[ERROR] Invalid list of addresses provided")
+	}
 
 	return addressesList, nil
 }
@@ -82,12 +94,17 @@ func main() {
 		log.Fatalln("[ERROR] Invalid number of flags provided, see `-help` flag")
 	}
 
+	// Return version details if flag is set
+	if VersionFlag {
+		fmt.Printf("%s - version: %s (SHA: %s)", Name, Version, GitCommit)
+		os.Exit(0)
+	}
+
 	mux := http.NewServeMux()
+	mux.HandleFunc("/", appendHeaders(logRequest(httpEcho)))
+	mux.HandleFunc("/health", appendHeaders(httpHealth))
 
-	mux.HandleFunc("/", httpEcho)
-	mux.HandleFunc("/health", healthEcho)
-
-	addressesList, err := parseListenAddresses(listen)
+	addressesList, err := parseListenAddresses(listenFlag)
 	if err != nil {
 		log.Fatalf("%s", err)
 	}
